@@ -122,6 +122,9 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
+            if global_step < 5:
+                print(f"global step {global_step} loss {loss.item()}")
+
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
