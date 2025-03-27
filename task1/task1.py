@@ -30,8 +30,6 @@ from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-import torch.distributed as dist # task 2
-
 # import a previous version of the HuggingFace Transformers package
 from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
                                   BertForSequenceClassification, BertTokenizer,
@@ -353,9 +351,6 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
-    parser.add_argument("--master_ip", type=str, default="127.0.0.1") #task 2
-    parser.add_argument("--master_port", type=str, default="29500") #task 2
-    parser.add_argument("--world_size", type=int, default=1) #task 2
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -364,15 +359,6 @@ def main():
     # set up (distributed) training
     args.device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     args.n_gpu = torch.cuda.device_count()
-
-    if args.local_rank != -1: #task 2
-        dist.init_process_group(
-            backend="gloo",
-            init_method=f"tcp://{args.master_ip}:{args.master_port}",
-            world_size=args.world_size,
-            rank=args.local_rank,
-        )
-
 
     # Setup logging
     logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
