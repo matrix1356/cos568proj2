@@ -59,6 +59,38 @@ MODEL_CLASSES = {
     'roberta': (RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer),
 }
 
+def gather_scatter(model): #task 2a
+    grad_list = []
+    for param in model.parameters():
+        if (param.requires_grad) and (param.grad is not None):
+            grad_list.append(param.grad.view(-1))
+    flatten_grad = torch.cat(grad_list)
+
+    if dist.get_rank() == 0:
+        gather_list = [torch.zeros_like(flatten_grad) for i in range(dist.get_world_size())] 
+    else:
+        gather_list = None
+    dist.gather(flatten_grad, gather_list, dst=0)
+
+    if dist.get_rank() == 0:
+        grad_mean = torch.stack(gather_list).mean(dim=0)
+        scatter_list = [grad_mean for i in range(dist.get_world_size())]
+    else:
+        scatter_list = None
+
+    avg_grad_received = torch.zeros_like(flatten_grad)
+    dist.scatter(avg_grad_received, scatter_list, src=0)
+
+    index = 0
+    for param in model.parameters():
+        if param.requires_grad and (param.grad is not None):
+            numel = param.grad.numel()
+            param.grad.copy_(avg_grad_received[index:index + numel].view_as(param.grad))
+            index += numel
+    return 
+    
+
+
 
 def set_seed(args):
     random.seed(args.seed)
@@ -133,12 +165,14 @@ def train(args, train_dataset, model, tokenizer):
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
+                gather_scatter(model) #task 2a
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             else:
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
+                gather_scatter(model) #task 2a
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
