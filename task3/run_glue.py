@@ -61,23 +61,6 @@ MODEL_CLASSES = {
     'roberta': (RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer),
 }
 
-def all_reduce_comm(args, model): #task 2b
-    if args.local_rank != -1:
-        for param in model.parameters():
-            if param.requires_grad and (param.grad is not None):
-                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-                param.grad /= args.world_size
-    return
-
-def loss_average(args, loss): #task 2
-    if args.local_rank != -1:
-        loss_t = torch.tensor(loss).to(args.device)
-        dist.all_reduce(loss_t, op=dist.ReduceOp.SUM)
-        loss_t /= args.world_size
-        return loss_t.item()
-    else:
-        return loss
-
 
 def set_seed(args):
     random.seed(args.seed)
@@ -149,12 +132,12 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
-            avg_loss = loss_average(args, loss.item())
+            #avg_loss = loss_average(args, loss.item())
 
             if global_step < 5:
-                print(f"global step {global_step} loss {avg_loss} rank {args.local_rank}")
+                print(f"global step {global_step} loss {loss.item()} rank {args.local_rank}")
 
-            loss_curve.append(avg_loss)
+            loss_curve.append(loss.item())
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -162,14 +145,12 @@ def train(args, train_dataset, model, tokenizer):
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
-                all_reduce_comm(args, model) #task 2b
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             else:
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
-                all_reduce_comm(args, model) #task 2b
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
@@ -195,10 +176,16 @@ def train(args, train_dataset, model, tokenizer):
         
         ##################################################
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
+        if args.local_rank not in [-1, 0]:
+            torch.distributed.barrier()
+
         evaluate(args, model, tokenizer, "")
+
+        if args.local_rank == 0:
+            torch.distributed.barrier()
         ##################################################
 
-    np.save(os.path.join(args.output_dir, f"task2b_rank_{args.local_rank}_loss.npy"), loss_curve)
+    np.save(os.path.join(args.output_dir, f"task3_rank_{args.local_rank}_loss.npy"), loss_curve)
 
     return global_step, tr_loss / global_step
 

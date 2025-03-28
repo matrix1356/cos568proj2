@@ -90,15 +90,6 @@ def gather_scatter(model): #task 2a
             param.grad.copy_(avg_grad_received[index:index + numel].view_as(param.grad))
             index += numel
     return 
-
-def loss_average(args, loss): #task 2
-    if args.local_rank != -1:
-        loss_t = torch.tensor(loss).to(args.device)
-        dist.all_reduce(loss_t, op=dist.ReduceOp.SUM)
-        loss_t /= args.world_size
-        return loss_t.item()
-    else:
-        return loss
     
 
 
@@ -151,6 +142,7 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
+    step_time_num = 0
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
@@ -159,7 +151,8 @@ def train(args, train_dataset, model, tokenizer):
         loss_curve = []
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
-            if global_step == 1:
+            step_time_num += 1
+            if step_time_num == 2:
                 start_time = time.time()
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
@@ -170,12 +163,12 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
-            avg_loss = loss_average(args, loss)
+            #avg_loss = loss_average(args, loss)
 
             if global_step < 5:
-                print(f"global step {global_step} loss {avg_loss} rank {args.local_rank}")
+                print(f"global step {global_step} loss {loss.item()} rank {args.local_rank}")
 
-            loss_curve.append(avg_loss)
+            loss_curve.append(loss.item())
 
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
@@ -212,11 +205,17 @@ def train(args, train_dataset, model, tokenizer):
 
         end_time = time.time()
 
-        print(f"average time per iteration {(end_time - start_time) / (global_step - 1)} rank {args.local_rank}")
+        print(f"average time per iteration {(end_time - start_time) / (step_time_num - 1)} rank {args.local_rank}")
         
         ##################################################
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
+        if args.local_rank not in [-1, 0]:
+            torch.distributed.barrier()
+
         evaluate(args, model, tokenizer, "")
+
+        if args.local_rank == 0:
+            torch.distributed.barrier()
         ##################################################
     
     np.save(os.path.join(args.output_dir, f"task2a_rank_{args.local_rank}_loss.npy"), loss_curve)
