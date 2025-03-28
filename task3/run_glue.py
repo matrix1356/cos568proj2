@@ -61,35 +61,13 @@ MODEL_CLASSES = {
     'roberta': (RobertaConfig, RobertaForSequenceClassification, RobertaTokenizer),
 }
 
-def gather_scatter(model): #task 2a
-    grad_list = []
-    for param in model.parameters():
-        if (param.requires_grad) and (param.grad is not None):
-            grad_list.append(param.grad.view(-1))
-    flatten_grad = torch.cat(grad_list)
-
-    if dist.get_rank() == 0:
-        gather_list = [torch.zeros_like(flatten_grad) for i in range(dist.get_world_size())] 
-    else:
-        gather_list = None
-    dist.gather(flatten_grad, gather_list, dst=0)
-
-    if dist.get_rank() == 0:
-        grad_mean = torch.stack(gather_list).mean(dim=0)
-        scatter_list = [grad_mean for i in range(dist.get_world_size())]
-    else:
-        scatter_list = None
-
-    avg_grad_received = torch.zeros_like(flatten_grad)
-    dist.scatter(avg_grad_received, scatter_list, src=0)
-
-    index = 0
-    for param in model.parameters():
-        if param.requires_grad and (param.grad is not None):
-            numel = param.grad.numel()
-            param.grad.copy_(avg_grad_received[index:index + numel].view_as(param.grad))
-            index += numel
-    return 
+def all_reduce_comm(args, model): #task 2b
+    if args.local_rank != -1:
+        for param in model.parameters():
+            if param.requires_grad and (param.grad is not None):
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                param.grad /= args.world_size
+    return
 
 def loss_average(args, loss): #task 2
     if args.local_rank != -1:
@@ -99,8 +77,6 @@ def loss_average(args, loss): #task 2
         return loss_t.item()
     else:
         return loss
-    
-
 
 
 def set_seed(args):
@@ -116,8 +92,10 @@ def train(args, train_dataset, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_device_train_batch_size
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset, rank=args.local_rank) #task 2
+    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset, rank=args.local_rank) #task 3
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+
+    loss_curve = []
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -157,6 +135,7 @@ def train(args, train_dataset, model, tokenizer):
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         loss_curve = []
+
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
             if global_step == 1:
@@ -170,7 +149,7 @@ def train(args, train_dataset, model, tokenizer):
             outputs = model(**inputs)
             loss = outputs[0]  # model outputs are always tuple in pytorch-transformers (see doc)
 
-            avg_loss = loss_average(args, loss)
+            avg_loss = loss_average(args, loss.item())
 
             if global_step < 5:
                 print(f"global step {global_step} loss {avg_loss} rank {args.local_rank}")
@@ -183,14 +162,14 @@ def train(args, train_dataset, model, tokenizer):
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
-                gather_scatter(model) #task 2a
+                all_reduce_comm(args, model) #task 2b
                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
             else:
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
                 ##################################################
-                gather_scatter(model) #task 2a
+                all_reduce_comm(args, model) #task 2b
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
@@ -209,7 +188,7 @@ def train(args, train_dataset, model, tokenizer):
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
-
+    
         end_time = time.time()
 
         print(f"average time per iteration {(end_time - start_time) / (global_step - 1)} rank {args.local_rank}")
@@ -218,8 +197,8 @@ def train(args, train_dataset, model, tokenizer):
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
         evaluate(args, model, tokenizer, "")
         ##################################################
-    
-    np.save(os.path.join(args.output_dir, f"task2a_rank_{args.local_rank}_loss.npy"), loss_curve)
+
+    np.save(os.path.join(args.output_dir, f"task2b_rank_{args.local_rank}_loss.npy"), loss_curve)
 
     return global_step, tr_loss / global_step
 
@@ -411,9 +390,9 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
-    parser.add_argument("--master_ip", type=str, default="127.0.0.1") #task 2
-    parser.add_argument("--master_port", type=str, default="12456") #task 2
-    parser.add_argument("--world_size", type=int, default=1) #task 2
+    parser.add_argument("--master_ip", type=str, default="127.0.0.1") #task 3
+    parser.add_argument("--master_port", type=str, default="12456") #task 3
+    parser.add_argument("--world_size", type=int, default=1) #task 3
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
@@ -422,9 +401,9 @@ def main():
     # set up (distributed) training
     args.device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     args.n_gpu = torch.cuda.device_count()
-    if args.local_rank == -1: args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    args.local_rank = int(os.environ.get("LOCAL_RANK", -1))
 
-    if args.local_rank != -1: #task 2
+    if args.local_rank != -1: #task 3
         dist.init_process_group(
             backend="gloo",
             init_method=f"tcp://{args.master_ip}:{args.master_port}",
@@ -452,6 +431,8 @@ def main():
     label_list = processor.get_labels()
     num_labels = len(label_list)
 
+    print(f"local rank {args.local_rank} !!!!!!!!!!!!!!!!!!!")
+
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
@@ -471,6 +452,14 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
+
+    if args.local_rank != -1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            #device_ids=None, 
+            #output_device=None,
+            #find_unused_parameters=False
+        )
 
     logger.info("Training/evaluation parameters %s", args)
 

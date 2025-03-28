@@ -394,6 +394,10 @@ def main():
     model = model_class.from_pretrained(args.model_name_or_path, config=config)
     ##################################################
 
+    #model_dir = "/scratch/gpfs/zs8839/cos5682/cos568proj2/bert_model"
+    #model.save_pretrained(model_dir)
+    #tokenizer.save_pretrained(model_dir)
+
     if args.local_rank == 0:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
